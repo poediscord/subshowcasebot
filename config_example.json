@@ -1,0 +1,18 @@
+{
+    "client_id": "",
+    "client_secret": "",
+    "refresh_token":"" ,
+    "user_agent": "",
+    "sub_name": "pathofexile",
+    "flair": "21312",
+    "max_delay": 5,
+    "pull_limit": 25,
+    "warn": {
+        "delay": 5,
+        "message": "You have not left a comment, your submission will be removed shortly if you do not."
+    },
+    "remove": {
+        "delay": 10,
+        "message": "Your post has been removed for violating rule x, if you post a comment it will be reapproved."
+    }
+}
