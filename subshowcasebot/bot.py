@@ -132,7 +132,7 @@ def check_submission(config, reddit, submission):
         if age >= warn_delay:
             # only posts old enough for the first action
             if not has_comment(submission):
-                # bot hasnt commented yet
+                # user hasnt commented yet
                 warning_comment, warn_age = was_warned(reddit, submission)
 
                 if age >= warn_delay and not warning_comment:
