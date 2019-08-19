@@ -1,12 +1,13 @@
-import praw
 import json
-from datetime import datetime, timedelta
-import time
-from enum import Enum
-
 import logging
+import time
+from datetime import datetime, timedelta
+from enum import Enum
+import praw
+from prawcore.exceptions import InsufficientScope
 
-log = logging.Logger("Reddit Bot")
+
+REQUIRED_SCOPES = ("edit", "flair", "identity", "modflair", "modlog", "modmail", "modposts", "privatemessages", "read")
 
 class State(Enum):
     CHECK = 0
@@ -15,6 +16,12 @@ class State(Enum):
     REMOVED = 3
     COMPLETE = 4
     IGNORE = 5
+
+class StateData:
+    def __init__(self, submission, state, created):
+        self.submission = submission
+        self.state = state
+        self.created = created
 
 def connect(config):
     reddit = praw.Reddit(
@@ -46,40 +53,43 @@ def monitor(config):
 
     while True:
         start = datetime.utcnow()
-        ignore_before = (start - timedelta(hours=-12)).timestamp()
+        ignore_before = (start - timedelta(hours=12)).timestamp()
 
         submitted_dates = []
 
         log.debug("Scanning /new")
+        log.debug(f"Ignoring posts older than: {datetime.fromtimestamp(ignore_before)}")
         # add new submissions we havnt seen to our check list
         for submission in subreddit.new(limit=pull_limit):
             if submission.created_utc > ignore_before:
                 if submission.id not in states:
-                    states[submission.id] = [submission, State.CHECK, submission.created_utc]
+                    states[submission.id] = StateData(submission, State.CHECK, submission.created_utc)
                     log.debug(f"Found {submission.id}")
 
             submitted_dates.append(submission.created_utc)
 
         log.debug("Scanning mod log")
         # add reflaired submissions that we havnt seen or that we saw but ignored
-        for submission in subreddit.mod.log(action="editflair", limit=pull_limit):
-            if submission.created_utc > ignore_before:
-                if (submission.id not in states) or (submission.id in states and states[submission.id] == State.IGNORE):
-                    states[submission.id] = [submission, State.CHECK, submission.created_utc]
+        for mod_action in subreddit.mod.log(action="editflair", limit=pull_limit):
+            if mod_action.created_utc > ignore_before:
+                if mod_action.details == "flair_edit":
+                    # the mod action just has a link to the actual target submission :U
+                    submission = reddit.submission(url=f"http://www.reddit.com{mod_action.target_permalink}")
                     log.debug(f"Found {submission.id}")
+                    if (mod_action.id not in states) or (mod_action.id in states and states[mod_action.id] == State.IGNORE):
+                        states[submission.id] = StateData(submission, State.CHECK, submission.created_utc)
 
         log.debug("Checking submissions")
         # check our submissions
         for sub_id, sub_data in states.items():
-            if sub_data[1] not in (State.COMPLETE, State.IGNORE):
-                sub_data[1] = check_submission(config, reddit, submission)
+            if sub_data.state not in (State.COMPLETE, State.IGNORE):
+                sub_data.state = check_submission(config, reddit, sub_data.submission)
 
         log.debug("Forgetting old submissions")
         # forget about submissions that are too old
         to_remove = set()
         for sub_id, sub_data in states.items():
-            submission, state, created = sub_data
-            if created <= ignore_before:
+            if sub_data.created <= ignore_before:
                 log.debug(f"Removing {sub_id}")
                 to_remove.add(sub_id)
 
@@ -98,8 +108,8 @@ def monitor(config):
 
         if submitted_dates:
             tot_delta = sum(submitted_dates)
-            avg_delta = timedelta( seconds=tot_delta/len(submitted_dates) )
-            delay = min(max_delay, avg_delta*pull_limit/4 - duration)
+            avg_delta = tot_delta/len(submitted_dates)
+            delay = min(max_delay, avg_delta*pull_limit/4 - duration.seconds)
         else:
             delay = max_delay
         
@@ -127,13 +137,17 @@ def check_submission(config, reddit, submission):
         # only look at posts that are untouched, flaired and not self
 
         log.debug(f"Submission is showcase")
-        age = submission.created_utc - datetime.utcnow()
-
+        age = datetime.utcnow().timestamp() - submission.created_utc
+        log.debug(f"Submission age: {age} seconds")
         if age >= warn_delay:
+            log.debug("Submission old enough to be warned")
             # only posts old enough for the first action
             if not has_comment(submission):
+                log.debug("Submitter hasnt commented yet")
                 # user hasnt commented yet
                 warning_comment, warn_age = was_warned(reddit, submission)
+
+                log.debug(f"Submission warned?: {warning_comment!=False}")
 
                 if age >= warn_delay and not warning_comment:
                     log.debug("Warning Submission")
@@ -162,14 +176,14 @@ def check_submission(config, reddit, submission):
         
 def has_comment(submission):
     submitter_name = submission.author.name
-    for comment in submission.comments():
+    for comment in submission.comments:
         if comment.author.name == submitter_name:
             return True
     return False
 
 def was_warned(reddit, submission):
     my_name = reddit.user.me(use_cache=True).name
-    for comment in submission.comments():
+    for comment in submission.comments:
         if comment.author.name == my_name:
             created_date = datetime.utcfromtimestamp( comment.created_utc )
             age = (created_date - datetime.utcnow().timestamp)
@@ -177,15 +191,28 @@ def was_warned(reddit, submission):
     return False, False
 
 def remove_submission(reddit, submission, warning_comment, message):
+    log.debug(f"Removing {submission.id}")
     warning_comment.delete()
     submission.mod.remove()
     submission.mod.send_removal_message(message)
 
 def warn_submission(reddit, submission, message):
+    log.debug(f"Posting reply to {submission.id}")
     comment = submission.reply(message)
     comment.distinguish(sticky=True)
 
 if __name__ == "__main__":
-    config = json.load("instance/config.json")
+    with open("instance/config.json") as f:
+        config = json.load(f)
 
-    monitor(config)
+    logging.basicConfig(format='%(asctime)s %(name)s:%(levelname)s:%(message)s',
+                        datefmt='%y-%m-%d %H:%M:%S')
+    log = logging.getLogger("subshowcasebot")
+    log.setLevel(config.get("loglevel", "WARNING"))
+
+    log.info(f"Starting showcase bot with log level: {log.level}")
+
+    try:
+        monitor(config)
+    except InsufficientScope as e:
+        log.error(f"PRAW raised InsufficientScope! Make sure you have the following scopes: {','.join(REQUIRED_SCOPES)}")
