@@ -7,7 +7,7 @@ import praw
 from prawcore.exceptions import InsufficientScope
 
 
-REQUIRED_SCOPES = ("edit", "flair", "identity", "modflair", "modlog", "modmail", "modposts", "privatemessages", "read")
+REQUIRED_SCOPES = ("edit", "flair", "identity", "modflair", "modlog", "modmail", "modposts", "privatemessages", "read", "submit")
 
 class State(Enum):
     CHECK = 0
@@ -36,7 +36,8 @@ def connect(config):
 def monitor(config):
     log.info("Connecting to reddit")
     reddit = connect(config)
-    log.info(f"Connected as: {reddit.user.me(use_cache=True).name}")
+    my_name = reddit.user.me(use_cache=True).name
+    log.info(f"Connected as: {my_name}")
     
     sub_name = config["sub_name"]
     
@@ -50,6 +51,17 @@ def monitor(config):
 
     # we adjust the delay based on how often people are posting
     delay = max_delay
+
+    # reload links we removed
+    ignore_before = (datetime.utcnow() - timedelta(hours=12)).timestamp()
+    log.debug("Reloading some cache from removed links")
+    for mod_action in subreddit.mod.log(action="remove", mod=reddit.user.me(), limit=pull_limit):
+        if mod_action.created_utc > ignore_before:
+            if mod_action.details == "remove":
+                submission = reddit.submission(url=f"http://www.reddit.com{mod_action.target_permalink}")
+                log.debug(f"Found {submission.id}")
+                if (submission.id not in states) or (submission.id in states and states[submission.id] == State.IGNORE):
+                    states[submission.id] = StateData(submission, State.CHECK, submission.created_utc)
 
     while True:
         start = datetime.utcnow()
@@ -73,10 +85,12 @@ def monitor(config):
         for mod_action in subreddit.mod.log(action="editflair", limit=pull_limit):
             if mod_action.created_utc > ignore_before:
                 if mod_action.details == "flair_edit":
+                    # check for both flair edits AND 
+                    # try to put our removed threads back in our cache after a restart
                     # the mod action just has a link to the actual target submission :U
                     submission = reddit.submission(url=f"http://www.reddit.com{mod_action.target_permalink}")
                     log.debug(f"Found {submission.id}")
-                    if (mod_action.id not in states) or (mod_action.id in states and states[mod_action.id] == State.IGNORE):
+                    if (submission.id not in states) or (submission.id in states and states[submission.id] == State.IGNORE):
                         states[submission.id] = StateData(submission, State.CHECK, submission.created_utc)
 
         log.debug("Checking submissions")
@@ -131,25 +145,39 @@ def check_submission(config, reddit, submission):
 
     log.debug(f"Checking {submission.id}")
 
-    if submission.link_flair_template_id == flair and \
+    if hasattr(submission, "link_flair_template_id") and \
+        submission.link_flair_template_id == flair and \
         not submission.is_self and \
-        not submission.approved:
+        not submission.approved and \
+        submission.author is not None:
         # only look at posts that are untouched, flaired and not self
+        # AND that were not deleted by the author
 
         log.debug(f"Submission is showcase")
         age = datetime.utcnow().timestamp() - submission.created_utc
         log.debug(f"Submission age: {age} seconds")
+
+        removed = False
+        if hasattr(submission, "banned_by"):
+            removed = True
+            if submission.banned_by != reddit.user.me(use_cache=True).name:
+                log.debug(f"Submission was removed by someone else ({submission.banned_by}), ignoring")
+                return State.IGNORE
+
         if age >= warn_delay:
             log.debug("Submission old enough to be warned")
-            # only posts old enough for the first action
+
+            warning_comment, warn_age = was_warned(reddit, submission)
+            log.debug(f"Submission warned?: {warning_comment!=False}")
+
             if not has_comment(submission):
                 log.debug("Submitter hasnt commented yet")
                 # user hasnt commented yet
-                warning_comment, warn_age = was_warned(reddit, submission)
 
-                log.debug(f"Submission warned?: {warning_comment!=False}")
-
-                if age >= warn_delay and not warning_comment:
+                if removed:
+                    # post removed and user hasnt commented, keep it removed
+                    return State.REMOVED
+                elif age >= warn_delay and not warning_comment:
                     log.debug("Warning Submission")
                     # has not been warned yet
                     warn_submission(reddit, submission, warn_message)
@@ -162,11 +190,11 @@ def check_submission(config, reddit, submission):
                     return State.REMOVED
             else:
                 log.debug("Submitter commented")
-                # user has commented, delete our reply if it exists
-                warning_comment, warn_age = was_warned(reddit, submission)
+                # user has commented undo all our work
                 if warning_comment:
-                    log.debug("Removing bot comment")
-                    warning_comment.delete()
+                    log.debug("Approving submission")
+                    approve_warned_submission(reddit, submission, warning_comment, removed)
+
                 return State.COMPLETE
         return State.CHECK
     else:
@@ -185,13 +213,13 @@ def was_warned(reddit, submission):
     my_name = reddit.user.me(use_cache=True).name
     for comment in submission.comments:
         if comment.author.name == my_name:
-            created_date = datetime.utcfromtimestamp( comment.created_utc )
-            age = (created_date - datetime.utcnow().timestamp)
+            created_date = comment.created_utc
+            age = datetime.utcnow().timestamp() - created_date
             return comment, age
     return False, False
 
 def remove_submission(reddit, submission, warning_comment, message):
-    log.debug(f"Removing {submission.id}")
+    log.info(f"Removing {submission.id}")
     warning_comment.delete()
     submission.mod.remove()
     submission.mod.send_removal_message(message)
@@ -199,7 +227,16 @@ def remove_submission(reddit, submission, warning_comment, message):
 def warn_submission(reddit, submission, message):
     log.debug(f"Posting reply to {submission.id}")
     comment = submission.reply(message)
-    comment.distinguish(sticky=True)
+    comment.mod.distinguish(sticky=True)
+
+def approve_warned_submission(reddit, submission, warning_comment, removed):
+    my_name = reddit.user.me(use_cache=True).name
+    if removed:
+        log.info(f"Approving {submission.id}")
+        submission.mod.approve()
+    if warning_comment:
+        log.debug("Removing our comment.")
+        warning_comment.delete()
 
 if __name__ == "__main__":
     with open("instance/config.json") as f:
@@ -209,7 +246,6 @@ if __name__ == "__main__":
                         datefmt='%y-%m-%d %H:%M:%S')
     log = logging.getLogger("subshowcasebot")
     log.setLevel(config.get("loglevel", "WARNING"))
-
     log.info(f"Starting showcase bot with log level: {log.level}")
 
     try:
