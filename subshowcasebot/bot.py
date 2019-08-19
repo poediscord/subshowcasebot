@@ -1,7 +1,7 @@
 import json
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 import praw
 from prawcore.exceptions import InsufficientScope
@@ -18,8 +18,7 @@ class State(Enum):
     IGNORE = 5
 
 class StateData:
-    def __init__(self, submission, state, created):
-        self.submission = submission
+    def __init__(self, state, created):
         self.state = state
         self.created = created
 
@@ -43,6 +42,7 @@ def monitor(config):
     
     max_delay = config.get("max_delay", 5) * 60 # in minutes
     pull_limit = config.get("pull_limit", 25)
+    ignore_older = config.get("ignore_older", 2) # hours
 
     states = {}
 
@@ -53,7 +53,7 @@ def monitor(config):
     delay = max_delay
 
     # reload links we removed
-    ignore_before = (datetime.utcnow() - timedelta(hours=12)).timestamp()
+    ignore_before = (datetime.now() - timedelta(hours=ignore_older)).timestamp()
     log.debug("Reloading some cache from removed links")
     for mod_action in subreddit.mod.log(action="remove", mod=reddit.user.me(), limit=pull_limit):
         if mod_action.created_utc > ignore_before:
@@ -61,21 +61,22 @@ def monitor(config):
                 submission = reddit.submission(url=f"http://www.reddit.com{mod_action.target_permalink}")
                 log.debug(f"Found {submission.id}")
                 if (submission.id not in states) or (submission.id in states and states[submission.id] == State.IGNORE):
-                    states[submission.id] = StateData(submission, State.CHECK, submission.created_utc)
+                    states[submission.id] = StateData(State.CHECK, submission.created_utc)
 
     while True:
-        start = datetime.utcnow()
-        ignore_before = (start - timedelta(hours=12)).timestamp()
-
+        start = datetime.now()
+        ignore_before =  (start - timedelta(hours=ignore_older))
+        log.debug(f"Ignoring posts older than: {ignore_before}")
+        ignore_before = ignore_before.timestamp()
+        
         submitted_dates = []
 
         log.debug("Scanning /new")
-        log.debug(f"Ignoring posts older than: {datetime.fromtimestamp(ignore_before)}")
         # add new submissions we havnt seen to our check list
         for submission in subreddit.new(limit=pull_limit):
             if submission.created_utc > ignore_before:
                 if submission.id not in states:
-                    states[submission.id] = StateData(submission, State.CHECK, submission.created_utc)
+                    states[submission.id] = StateData(State.CHECK, submission.created_utc)
                     log.debug(f"Found {submission.id}")
 
             submitted_dates.append(submission.created_utc)
@@ -89,15 +90,16 @@ def monitor(config):
                     # try to put our removed threads back in our cache after a restart
                     # the mod action just has a link to the actual target submission :U
                     submission = reddit.submission(url=f"http://www.reddit.com{mod_action.target_permalink}")
-                    log.debug(f"Found {submission.id}")
                     if (submission.id not in states) or (submission.id in states and states[submission.id] == State.IGNORE):
-                        states[submission.id] = StateData(submission, State.CHECK, submission.created_utc)
+                        log.debug(f"Found {submission.id}")
+                        states[submission.id] = StateData(State.CHECK, submission.created_utc)
 
         log.debug("Checking submissions")
         # check our submissions
         for sub_id, sub_data in states.items():
             if sub_data.state not in (State.COMPLETE, State.IGNORE):
-                sub_data.state = check_submission(config, reddit, sub_data.submission)
+                submission = reddit.submission(id=sub_id)
+                sub_data.state = check_submission(config, reddit, submission)
 
         log.debug("Forgetting old submissions")
         # forget about submissions that are too old
@@ -110,7 +112,7 @@ def monitor(config):
         for sub_id in to_remove:
             del states[sub_id]
 
-        end = datetime.utcnow()
+        end = datetime.now()
 
         duration = end-start
 
@@ -154,11 +156,11 @@ def check_submission(config, reddit, submission):
         # AND that were not deleted by the author
 
         log.debug(f"Submission is showcase")
-        age = datetime.utcnow().timestamp() - submission.created_utc
+        age = datetime.now().timestamp() - submission.created_utc
         log.debug(f"Submission age: {age} seconds")
 
         removed = False
-        if hasattr(submission, "banned_by"):
+        if hasattr(submission, "banned_by") and submission.banned_by is not None:
             removed = True
             if submission.banned_by != reddit.user.me(use_cache=True).name:
                 log.debug(f"Submission was removed by someone else ({submission.banned_by}), ignoring")
@@ -176,14 +178,15 @@ def check_submission(config, reddit, submission):
 
                 if removed:
                     # post removed and user hasnt commented, keep it removed
+                    log.debug("Submission already removed")
                     return State.REMOVED
-                elif age >= warn_delay and not warning_comment:
+                elif not warning_comment:
                     log.debug("Warning Submission")
                     # has not been warned yet
                     warn_submission(reddit, submission, warn_message)
                     return State.WARNED
-                elif age >= remove_delay and warn_age and \
-                    warn_age > remove_delay:
+                elif warn_age and \
+                    warn_age >= remove_delay:
                     log.debug("Removing Submission")
                     # submitter was warned long enough ago and didnt do anything
                     remove_submission(reddit, submission, warning_comment, remove_message)
@@ -214,7 +217,7 @@ def was_warned(reddit, submission):
     for comment in submission.comments:
         if comment.author.name == my_name:
             created_date = comment.created_utc
-            age = datetime.utcnow().timestamp() - created_date
+            age = datetime.now().timestamp() - created_date
             return comment, age
     return False, False
 
@@ -230,13 +233,15 @@ def warn_submission(reddit, submission, message):
     comment.mod.distinguish(sticky=True)
 
 def approve_warned_submission(reddit, submission, warning_comment, removed):
-    my_name = reddit.user.me(use_cache=True).name
     if removed:
         log.info(f"Approving {submission.id}")
         submission.mod.approve()
     if warning_comment:
         log.debug("Removing our comment.")
         warning_comment.delete()
+
+def utc_to_local(utc_dt):
+    return utc_dt.replace(tzinfo=timezone.utc).astimezone(tz=None)
 
 if __name__ == "__main__":
     with open("instance/config.json") as f:
