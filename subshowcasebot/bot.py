@@ -106,7 +106,7 @@ def monitor(config):
         to_remove = set()
         for sub_id, sub_data in states.items():
             if sub_data.created <= ignore_before:
-                log.debug(f"Removing {sub_id}")
+                log.debug(f"Forgetting {sub_id}")
                 to_remove.add(sub_id)
 
         for sub_id in to_remove:
