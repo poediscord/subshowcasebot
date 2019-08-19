@@ -253,7 +253,13 @@ if __name__ == "__main__":
     log.setLevel(config.get("loglevel", "WARNING"))
     log.info(f"Starting showcase bot with log level: {log.level}")
 
-    try:
-        monitor(config)
-    except InsufficientScope as e:
-        log.error(f"PRAW raised InsufficientScope! Make sure you have the following scopes: {','.join(REQUIRED_SCOPES)}")
+    while True:
+        try:
+            monitor(config)
+        except InsufficientScope as e:
+            log.error(f"PRAW raised InsufficientScope! Make sure you have the following scopes: {','.join(REQUIRED_SCOPES)}")
+            raise e
+        except praw.exceptions.PRAWException:
+            log.error(f"PRAW raised an exception! Logging but ignoring.", exc_info=True)
+        time.sleep(5*60)
+        # in the case of an error, sleep 5 minutes and try again
