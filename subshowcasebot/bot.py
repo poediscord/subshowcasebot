@@ -1,6 +1,7 @@
 import json
 import logging
 import time
+import os
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 import praw
@@ -21,6 +22,8 @@ class StateData:
     def __init__(self, state, created):
         self.state = state
         self.created = created
+        
+states = {}
 
 def connect(config):
     reddit = praw.Reddit(
@@ -44,7 +47,6 @@ def monitor(config):
     pull_limit = config.get("pull_limit", 25)
     ignore_older = config.get("ignore_older", 2) # hours
 
-    states = {}
 
     log.info(f"Getting subreddit {sub_name}")
     subreddit = reddit.subreddit(sub_name)
@@ -244,7 +246,9 @@ def utc_to_local(utc_dt):
     return utc_dt.replace(tzinfo=timezone.utc).astimezone(tz=None)
 
 if __name__ == "__main__":
-    with open("instance/config.json") as f:
+    config_location = os.environ.get("CONFIG_FILE", "instance/config.json")
+
+    with open(config_location) as f:
         config = json.load(f)
 
     logging.basicConfig(format='%(asctime)s %(name)s:%(levelname)s:%(message)s',
