@@ -4,15 +4,17 @@
     "refresh_token":"" ,
     "user_agent": "",
     "sub_name": "pathofexile",
-    "flair": "21312",
-    "max_delay": 5,
+    "flair": "uuid",
+    "loglevel": "INFO",
+    "max_delay": 1,
     "pull_limit": 25,
+    "ignore_older": 2,
     "warn": {
         "delay": 5,
-        "message": "You have not left a comment, your submission will be removed shortly if you do not."
+        "message": "Your Item Showcase post does not appear to have a comment explaining it yet.\n\nAs per [Rule 10](https://www.reddit.com/r/pathofexile/wiki/rules) all item showcase submissions must post a comment describing the post.\n\nThis comment is just a warning. However, if you do not post your comment soon this thread will be temporarily hidden until you have done so. If your post is hidden we will automatically make it visible again if you post your comment within two hours. After that you will need to message the the moderators to sort it out.\n\n**This rule is currently undergoing a one week trial. If you have any comments please contact the moderators**\n---\nThis message was sent by a bot, this bot is still in the testing phase. If there are any issues please contact the moderators."
     },
     "remove": {
         "delay": 10,
-        "message": "Your post has been removed for violating rule x, if you post a comment it will be reapproved."
+        "message": "Your Item Showcase post has been removed because you have not posted a comment explaining it.\n\n[Rule 10](https://www.reddit.com/r/pathofexile/wiki/rules) requires all item showcase submissions to have a comment describing the post.\n\nYour submission will automatically be reapproved as long as you post your comment within two hours of creating your thread. \n\n**This rule is currently undergoing a one week trial. If you have any comments please contact the moderators**\n---\nThis message was sent by a bot, this bot is still in the testing phase. If there are any issues please contact the moderators."
     }
 }
