@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 import praw
 from prawcore.exceptions import InsufficientScope
+from requests.exceptions import HTTPError
 
 
 REQUIRED_SCOPES = ("edit", "flair", "identity", "modflair", "modlog", "modmail", "modposts", "privatemessages", "read", "submit")
@@ -33,6 +34,8 @@ class Config:
 
         self.remove_delay = timedelta(minutes=config["remove"]["delay"]) # in minutes
         self.remove_message = config["remove"]["message"]
+
+        self.top_level_only_message = config["top_level_only"]["message"]
 
 
 class State(Enum):
@@ -73,112 +76,104 @@ def connect(config):
     return reddit
 
 
-def monitor(reddit, config):
-    log.info(f"Getting subreddit {config.sub_name}")
-    subreddit = reddit.subreddit(config.sub_name)
-
+def monitor(reddit, subreddit, config):
     # we adjust the delay based on how often people are posting
     delay = config.max_delay
 
-    # reload links we removed
-    log.debug("Reloading some cache")
-    scan_mod_log(config, reddit, subreddit, action="remove", mod=reddit.user.me())
+    start = datetime.now()
+    ignore_before =  (start - timedelta(hours=config.ignore_older))
+    log.debug(f"Ignoring posts older than: {ignore_before}")
+    
+    submitted_dates = []
 
-    while True:
-        start = datetime.now()
-        ignore_before =  (start - timedelta(hours=config.ignore_older))
-        log.debug(f"Ignoring posts older than: {ignore_before}")
-        
-        submitted_dates = []
+    flair_delay = config.warn_delay + config.remove_delay
 
-        flair_delay = config.warn_delay + config.remove_delay
+    log.debug(f"Check for flair changes often every {flair_delay}")
 
-        log.debug(f"Check for flair changes often for {flair_delay}")
+    log.debug("Scanning /new")
+    # add new submissions we havnt seen to our check list
+    for submission in subreddit.new(limit=config.pull_limit):
+        sub_created = datetime.fromtimestamp(submission.created_utc)
+        if sub_created >= ignore_before:
+            found_submission(submission, start)
 
-        log.debug("Scanning /new")
-        # add new submissions we havnt seen to our check list
-        for submission in subreddit.new(limit=config.pull_limit):
-            sub_created = datetime.fromtimestamp(submission.created_utc)
-            if sub_created >= ignore_before:
-                found_submission(submission, start)
+        submitted_dates.append(sub_created)
 
-            submitted_dates.append(sub_created)
+    # scans for posts where the mod changed the flair
+    scan_mod_log(config, reddit, subreddit, action="editflair", details="flair_edit")
 
-        # scans for posts where the mod changed the flair
-        scan_mod_log(config, reddit, subreddit, action="editflair", details="flair_edit")
+    log.debug("Checking submissions")
+    # check our submissions
+    for sub_id, sub_data in states.items():
+        # possibly skip checking this submission for a bit
+        if sub_data.state == State.CHECK or \
+                (sub_data.state == State.CHECK_SLOW and \
+                (sub_data.last_check + config.check_slow_delay) <= start):
 
-        log.debug("Checking submissions")
-        # check our submissions
-        for sub_id, sub_data in states.items():
-            # possibly skip checking this submission for a bit
-            if sub_data.state == State.CHECK or \
-                    (sub_data.state == State.CHECK_SLOW and \
-                    (sub_data.last_check + config.check_slow_delay) <= start):
+            submission = reddit.submission(id=sub_id)
 
-                submission = reddit.submission(id=sub_id)
+            sub_age = start - datetime.fromtimestamp(submission.created_utc)
+            log.debug(f"Precheck submission {submission.id} age: {sub_age}")
 
-                sub_age = start - datetime.fromtimestamp(submission.created_utc)
-                log.debug(f"Submission {submission.id} age: {sub_age}")
-
-                correct_flair = check_sub_flair(submission)
-                meta_good = check_sub_meta(submission)
-                
-                if meta_good and correct_flair:
-                    sub_data.state = check_submission(config, submission, sub_age)
-                elif meta_good and not correct_flair:
-                    # could in theory eventually have the correct flair, check slow if its an older post
-                    if sub_age > flair_delay:
-                        log.debug(f"Submission {sub_id} could in theory eventually have the correct flair, check slow")
-                        sub_data.state = State.CHECK_SLOW
-                    else:
-                        log.debug(f"Submission {sub_id} has the wrong flair but is new, check often for flair updates")
-                        sub_data.state = State.CHECK
+            correct_flair = check_sub_flair(submission)
+            meta_good = check_sub_meta(submission)
+            
+            if meta_good and correct_flair:
+                sub_data.state = check_submission(config, submission, sub_age)
+            elif meta_good and not correct_flair:
+                # could in theory eventually have the correct flair, check slow if its an older post
+                if sub_age > flair_delay:
+                    log.debug(f"Submission {sub_id} could in theory eventually have the correct flair, check slow")
+                    sub_data.state = State.CHECK_SLOW
                 else:
-                    log.debug(f"Submission {sub_id} will never be relevent, ignore")
-                    sub_data.state = State.IGNORE
-
-                sub_data.last_check = start
+                    log.debug(f"Submission {sub_id} has the wrong flair but is new, check often for flair updates")
+                    sub_data.state = State.CHECK
             else:
-                if sub_data.state == State.CHECK_SLOW:
-                    log.debug(f"Submission {sub_id} skipped, check after {sub_data.last_check + config.check_slow_delay}")
+                log.debug(f"Submission {sub_id} will never be relevent, ignore")
+                sub_data.state = State.IGNORE
 
-        log.debug("Forgetting old submissions")
-        # forget about submissions that are too old and that are not being checked normally
-        to_remove = set()
-        for sub_id, sub_data in states.items():
-            if sub_data.state != State.CHECK and sub_data.noticed_at <= ignore_before:
-                log.debug(f"Forgetting {sub_id}")
-                to_remove.add(sub_id)
-
-        log.debug(f"Forgetting {len(to_remove)} posts.")
-        for sub_id in to_remove:
-            del states[sub_id]
-
-        log.debug(f"Posts remaining in cache: {len(states)}.")
-
-        end = datetime.now()
-
-        duration = end-start
-
-        log.debug(f"Completed loop in {duration}")
-        
-        # calculate how often to check,
-        # we use the a quarter of the average amount of time it
-        # takes the sub to make pull_limit threads minus how long we took
-
-        if submitted_dates:
-            tot_delta = sum(date.timestamp() for date in submitted_dates)
-            avg_delta = tot_delta/len(submitted_dates)
-            delay = min(config.max_delay, avg_delta*config.pull_limit/4 - duration.seconds)
+            sub_data.last_check = start
         else:
-            delay = config.max_delay
-        
-        # this in theory could be a delay of 0 but thats fine because
-        # the library correctly rate limits anyway
-        # with a limit of 25 and max delay of 5, it would take an average
-        # delta of 0.8 minutes (75 threads per hour) to go under 5 minutes.
-        log.debug(f"Sleeping for {delay} seconds")
-        time.sleep( delay )
+            if sub_data.state == State.CHECK_SLOW:
+                log.debug(f"Submission {sub_id} skipped, check after {sub_data.last_check + config.check_slow_delay}")
+
+    log.debug("Forgetting old submissions")
+    # forget about submissions that are too old and that are not being checked normally
+    to_remove = set()
+    for sub_id, sub_data in states.items():
+        if sub_data.state != State.CHECK and sub_data.noticed_at <= ignore_before:
+            log.debug(f"Forgetting {sub_id}")
+            to_remove.add(sub_id)
+
+    log.debug(f"Forgetting {len(to_remove)} posts.")
+    for sub_id in to_remove:
+        del states[sub_id]
+
+    log.debug(f"Posts remaining in cache: {len(states)}.")
+
+    end = datetime.now()
+
+    duration = end-start
+
+    log.debug(f"Completed run in {duration}")
+    
+    # calculate how often to check,
+    # we use the a quarter of the average amount of time it
+    # takes the sub to make pull_limit threads minus how long we took
+
+    if submitted_dates:
+        tot_delta = sum(date.timestamp() for date in submitted_dates)
+        avg_delta = tot_delta/len(submitted_dates)
+        delay = min(config.max_delay, avg_delta*config.pull_limit/4 - duration.seconds)
+    else:
+        delay = config.max_delay
+    
+    # this in theory could be a delay of 0 but thats fine because
+    # the library correctly rate limits anyway
+    # with a limit of 25 and max delay of 5, it would take an average
+    # delta of 0.8 minutes (75 threads per hour) to go under 5 minutes.
+    log.debug(f"Sleeping for {delay} seconds")
+    time.sleep( delay )
     
 def check_sub_flair(submission):
     if hasattr(submission, "link_flair_template_id") and \
@@ -239,7 +234,7 @@ def check_submission(config, submission, age):
     if hasattr(submission, "banned_by") and submission.banned_by is not None:
         removed = True
         if submission.banned_by != my_name:
-            log.debug(f"Submission {submission.id} was removed by someone else ({submission.banned_by}), ignoring")
+            log.debug(f"Submission {submission.id} was removed by someone else, ignoring")
             return State.IGNORE
         else:
             log.debug(f"Submission {submission.id} was removed by us")
@@ -252,10 +247,14 @@ def check_submission(config, submission, age):
         if age >= config.warn_delay:
             log.debug(f"Submission {submission.id} old enough to be warned")
 
-            log.debug(f"Submission {submission.id} already warned: {warning_comment!=False} when: {warn_age} ago")
+            log.debug(f"Submission {submission.id} already warned: {warning_comment!=None} when: {warn_age} ago")
 
-            if removed:
+            if warning_comment:
+                check_tell_user_top_level_only(submission, warning_comment)
+
+            if removed and warn_age >= config.remove_delay:
                 # post removed [by us] and user still hasnt commented, keep it removed (until they comment)
+                # we will continue to check often for a little bit of time after their post was removed.
                 log.debug(f"Submission {submission.id} already removed")
                 return State.CHECK_SLOW
             elif not warning_comment:
@@ -264,18 +263,20 @@ def check_submission(config, submission, age):
                 warn_submission(submission, config.warn_message)
                 # recheck often for their comment
                 return State.CHECK
-            elif warn_age and \
-                warn_age >= config.remove_delay:
+            elif warn_age and warn_age >= config.remove_delay:
                 # submitter was warned long enough ago and didnt do anything
                 log.debug(f"Submission {submission.id} removing")
                 remove_submission(submission, warning_comment, config.remove_message)
-                # check less often because they took so long
-                return State.CHECK_SLOW
+                # check quick for now, after the grace period will will check slow
+                return State.CHECK
             else:
                 # post warned but not removed yet, they might comment soon
+                if removed:
+                    log.debug(f"Submission {submission.id} already removed but we are still in the quick check grace period")
                 return State.CHECK
         else:
             # thread too young, check often for changes
+            log.debug(f"Submission {submission.id} is too new to do anything about.")
             return State.CHECK
     else:
         # user has commented undo all our work
@@ -291,6 +292,10 @@ def get_comments(submission):
 
     submitter_name = submission.author.name
     for comment in submission.comments:
+        # deleted comments have no author
+        if not comment.author:
+            continue
+
         if comment.author.name == submitter_name:
             submitters_comment = comment
         elif comment.author.name == my_name:
@@ -300,6 +305,37 @@ def get_comments(submission):
             break
 
     return submitters_comment, my_comment, my_comment_age
+
+def check_tell_user_top_level_only(submission, my_comment):
+    user_reply = check_replied_to_comment(my_comment, submission.author.name)
+    if user_reply:
+        log.debug(f"Submitter of {submission.id} replied to the bot")
+        my_reply = check_replied_to_comment(my_comment, my_name)
+        if not my_reply:
+            tell_user_top_level_only(submission, user_reply)
+        else:
+            log.debug(f"Submitter of {submission.id} already told to make a top level comment.")
+
+
+def check_replied_to_comment(parent_comment, name):
+    parent_comment.replies.replace_more(limit=2)
+    # 'MoreComments' objects need to be dealt with/loaded sometimes
+    for comment in parent_comment.replies:
+        if isinstance(comment, praw.models.MoreComments):
+            # for some reason a ton of replies were made and we didnt load them all
+            log.warning(f"Comment {parent_comment.id} had extra many MoreComment links")
+            continue
+
+        if comment.author.name == name:
+            return comment
+
+    return None
+
+def tell_user_top_level_only(submission, user_reply):
+    log.debug(f"Tell Submitter of {submission.id} to make a top level comment instead.")
+    my_reply = user_reply.reply(config.top_level_only_message)
+    my_reply.mod.distinguish()
+    return my_reply
 
 def remove_submission(submission, warning_comment, message):
     log.info(f"Removing {submission.id}")
@@ -334,14 +370,33 @@ if __name__ == "__main__":
 
     try:
         reddit = connect(config)
+        error_count = 0
+
+        log.info(f"Getting subreddit {config.sub_name}")
+        subreddit = reddit.subreddit(config.sub_name)
+
+        # reload links we removed
+        log.debug("Reloading some cache")
+        scan_mod_log(config, reddit, subreddit, action="remove", mod=reddit.user.me())
 
         while True:
             try:
-                monitor(reddit, config)
-            except praw.exceptions.PRAWException:
-                log.error(f"PRAW raised an exception! Logging but ignoring.", exc_info=True)
-            time.sleep(5*60)
-            # in the case of an error, sleep 5 minutes and try again
+                monitor(reddit, subreddit, config)
+
+                error_count = 0
+            except praw.exceptions.APIException:
+                log.error(f"PRAW raised an API exception! Logging but ignoring.", exc_info=True)
+                error_count = min(10, error_count)
+            except HTTPError:
+                log.error(f"requests raised an exception! Logging but ignoring.", exc_info=True)
+                error_count = min(10, error_count)
+
+            # in the case of an error, sleep longer and longer
+            # one error, retry right away
+            # more than one, delay a minute per consecutive error.
+            # when reddit is down, this value will go up
+            # when its just something like we cant reply to this deleted comment, try again right away
+            time.sleep(max(0,error_count)*60)
     except InsufficientScope as e:
         log.error(f"PRAW raised InsufficientScope! Make sure you have the following scopes: {','.join(REQUIRED_SCOPES)}")
         raise e
