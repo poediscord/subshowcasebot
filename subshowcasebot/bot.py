@@ -301,20 +301,6 @@ def get_comments(submission):
 
     return submitters_comment, my_comment, my_comment_age
 
-def has_comment(submission):
-    submitter_name = submission.author.name
-    for comment in submission.comments:
-        if comment.author.name == submitter_name:
-            return True
-    return False
-
-def was_warned(submission):
-    for comment in submission.comments:
-        if comment.author.name == my_name:
-            age = datetime.now() - datetime.fromtimestamp(comment.created_utc)
-            return comment, age
-    return False, False
-
 def remove_submission(submission, warning_comment, message):
     log.info(f"Removing {submission.id}")
     warning_comment.delete()
