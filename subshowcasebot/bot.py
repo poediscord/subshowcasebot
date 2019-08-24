@@ -398,10 +398,10 @@ if __name__ == "__main__":
                 error_count = 0
             except praw.exceptions.APIException:
                 log.error(f"PRAW raised an API exception! Logging but ignoring.", exc_info=True)
-                error_count = min(10, error_count)
+                error_count = min(10, error_count+1)
             except HTTPError:
                 log.error(f"requests raised an exception! Logging but ignoring.", exc_info=True)
-                error_count = min(10, error_count)
+                error_count = min(10, error_count+1)
 
             # in the case of an error, sleep longer and longer
             # one error, retry right away
