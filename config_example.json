@@ -1,20 +1,29 @@
 {
-    "client_id": "",
-    "client_secret": "",
-    "refresh_token":"" ,
-    "user_agent": "",
-    "sub_name": "pathofexile",
-    "flair": "uuid",
-    "loglevel": "INFO",
+    "auth": {
+        "client_id": "",
+        "client_secret": "",
+        "refresh_token":"" ,
+        "user_agent": "subshowcasebot v1.0 by <put your username here>"
+    },
+    "sub_name": "",
+    "flairs": {
+        "target": "flair uuid here",
+        "watch": ["list of flairs we watch to see if a submission changes to our target"]
+    },
+    "loglevel": "DEBUG",
     "max_delay": 1,
     "pull_limit": 25,
-    "ignore_older": 2,
+    "ignore_older": 2, 
+    "check_slow_delay": 10,
     "warn": {
         "delay": 5,
-        "message": "Your Item Showcase post does not appear to have a comment explaining it yet.\n\nAs per [Rule 10](https://www.reddit.com/r/pathofexile/wiki/rules) all item showcase submissions must post a comment describing the post.\n\nThis comment is just a warning. However, if you do not post your comment soon this thread will be temporarily hidden until you have done so. If your post is hidden we will automatically make it visible again if you post your comment within two hours. After that you will need to message the the moderators to sort it out.\n\n**This rule is currently undergoing a one week trial. If you have any comments please contact the moderators**\n---\nThis message was sent by a bot, this bot is still in the testing phase. If there are any issues please contact the moderators."
+        "message": "Message to warn a user of an impending removal"
     },
     "remove": {
         "delay": 10,
-        "message": "Your Item Showcase post has been removed because you have not posted a comment explaining it.\n\n[Rule 10](https://www.reddit.com/r/pathofexile/wiki/rules) requires all item showcase submissions to have a comment describing the post.\n\nYour submission will automatically be reapproved as long as you post your comment within two hours of creating your thread. \n\n**This rule is currently undergoing a one week trial. If you have any comments please contact the moderators**\n---\nThis message was sent by a bot, this bot is still in the testing phase. If there are any issues please contact the moderators."
+        "message": "Message to tell a user their post was removed"
+    },
+    "top_level_only": {
+        "message": "Message telling user not to reply to the bot"
     }
 }
