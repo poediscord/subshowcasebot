@@ -7,7 +7,7 @@ HOW TO
 ===
 Build your docker container
 ```
-docker build --tag=subshowcasebot:v0.1 .
+docker build --tag=subshowcasebot:latest .
 ```
 
 Upload a secret with your config

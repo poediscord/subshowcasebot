@@ -13,15 +13,16 @@ REQUIRED_SCOPES = ("edit", "flair", "identity", "modflair", "modlog", "modmail",
 
 class Config:
     def __init__(self, config):
-        self.client_id = config["client_id"]
-        self.client_secret = config["client_secret"]
-        self.refresh_token = config["refresh_token"]
-        self.user_agent = config["user_agent"]
+        self.client_id = config["auth"]["client_id"]
+        self.client_secret = config["auth"]["client_secret"]
+        self.refresh_token = config["auth"]["refresh_token"]
+        self.user_agent = config["auth"]["user_agent"]
 
         self.loglevel = config.get("loglevel", "INFO")
 
         self.sub_name = config["sub_name"]
-        self.flair = config["flair"]
+        self.flair = config["flairs"]["target"]
+        self.watch_flairs = config["flairs"]["watch"]
 
         self.max_delay = config.get("max_delay", 5) * 60 # in minutes
         self.pull_limit = config.get("pull_limit", 25)
@@ -37,6 +38,10 @@ class Config:
 
         self.top_level_only_message = config["top_level_only"]["message"]
 
+class FlairStatus(Enum):
+    CORRECT = 0
+    WATCH = 1
+    IRRELEVENT = 2
 
 class State(Enum):
     CHECK = 0
@@ -92,8 +97,9 @@ def monitor(reddit, subreddit, config):
 
     log.debug("Scanning /new")
     # add new submissions we havnt seen to our check list
-    for submission in subreddit.new(limit=config.pull_limit):
+    for submission in subreddit.new(limit=config.pull_limit): 
         sub_created = datetime.fromtimestamp(submission.created_utc)
+        log.debug(f"Saw {submission.id} posted {sub_created}")
         if sub_created >= ignore_before:
             found_submission(submission, start)
 
@@ -115,12 +121,12 @@ def monitor(reddit, subreddit, config):
             sub_age = start - datetime.fromtimestamp(submission.created_utc)
             log.debug(f"Precheck submission {submission.id} age: {sub_age}")
 
-            correct_flair = check_sub_flair(submission)
+            flair_status = check_sub_flair(submission)
             meta_good = check_sub_meta(submission)
             
-            if meta_good and correct_flair:
+            if meta_good and flair_status == FlairStatus.CORRECT:
                 sub_data.state = check_submission(config, submission, sub_age)
-            elif meta_good and not correct_flair:
+            elif meta_good and flair_status == FlairStatus.WATCH:
                 # could in theory eventually have the correct flair, check slow if its an older post
                 if sub_age > flair_delay:
                     log.debug(f"Submission {sub_id} could in theory eventually have the correct flair, check slow")
@@ -176,14 +182,16 @@ def monitor(reddit, subreddit, config):
     time.sleep( delay )
     
 def check_sub_flair(submission):
-    if hasattr(submission, "link_flair_template_id") and \
-        submission.link_flair_template_id == config.flair:
-        log.debug(f"Submission {submission.id} has correct flair ")
-        # if its flaird right then we just want to know if its relevent
-        return True
-    else:
-        log.debug(f"Submission {submission.id} has incorrect flair ")
-        return False
+    if hasattr(submission, "link_flair_template_id"):
+        if submission.link_flair_template_id == config.flair:
+            log.debug(f"Submission {submission.id} has correct flair ")
+            # if its flaird right then we just want to know if its relevent
+            return FlairStatus.CORRECT
+        elif submission.link_flair_template_id in config.watch_flairs:
+            log.debug(f"Submission {submission.id} has a watchable flair ")
+            return FlairStatus.WATCH
+    log.debug(f"Submission {submission.id} has incorrect flair ")
+    return FlairStatus.IRRELEVENT
 
 def check_sub_meta(submission):
     if submission.is_self:
@@ -331,6 +339,8 @@ def check_replied_to_comment(parent_comment, name):
 
     return None
 
+##### Functions that actually do things to posts/users
+
 def tell_user_top_level_only(submission, user_reply):
     log.debug(f"Tell Submitter of {submission.id} to make a top level comment instead.")
     my_reply = user_reply.reply(config.top_level_only_message)
@@ -355,6 +365,8 @@ def approve_submission(submission, warning_comment, removed):
     if warning_comment:
         log.debug("Removing our comment.")
         warning_comment.delete()
+
+#### End posts that actually do things to posts/users
 
 def utc_to_local(utc_dt):
     return utc_dt.replace(tzinfo=timezone.utc).astimezone(tz=None)
