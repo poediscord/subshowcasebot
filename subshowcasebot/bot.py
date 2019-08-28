@@ -210,7 +210,9 @@ def check_sub_meta(submission):
     return True
 
 def found_submission(submission, noticed_at):
-    if submission.id not in states:
+    if submission.id not in states or \
+        (submission.id in states and states[submission.id].noticed_at < noticed_at):
+        # if its new, or it was noticed at a newer time, eg in the mod log
         log.debug(f"Found {submission.id}")
         states[submission.id] = StateData(State.CHECK, noticed_at)
 
@@ -220,19 +222,20 @@ def scan_mod_log(config, reddit, subreddit, action, details=None, mod=None):
 
     now = datetime.now()
 
-    ignore_before = (now - timedelta(hours=config.ignore_older)).timestamp()
+    ignore_before = (now - timedelta(hours=config.ignore_older))
     
     log.debug("Scanning mod log")
     # add reflaired/removed submissions that we havnt seen or that we saw but ignored
     for mod_action in subreddit.mod.log(action=action, mod=mod, limit=config.pull_limit):
-        if mod_action.created_utc > ignore_before:
+        action_at = datetime.fromtimestamp(mod_action.created_utc)
+        if action_at > ignore_before:
             # we use the date the mod action was created, this allows mods to put a post back in the system
             if mod_action.details == details:
                 # check for both flair edits AND 
                 # try to put our removed threads back in our cache after a restart
                 # the mod action just has a link to the actual target submission :U
                 submission = reddit.submission(url=f"http://www.reddit.com{mod_action.target_permalink}")
-                found_submission(submission, now)
+                found_submission(submission, action_at)
 
 def check_submission(config, submission, age):
 
