@@ -101,7 +101,7 @@ def monitor(reddit, subreddit, config):
         sub_created = datetime.fromtimestamp(submission.created_utc)
         log.debug(f"Saw {submission.id} posted {sub_created}")
         if sub_created >= ignore_before:
-            found_submission(submission, start)
+            found_submission(submission, sub_created)
 
         submitted_dates.append(sub_created)
 
